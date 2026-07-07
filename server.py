@@ -15,6 +15,8 @@ Auth sortante  : header  Authorization: Bearer <HIVEOS_TOKEN>
 
 import json
 import os
+import threading
+import time
 
 import httpx
 from fastmcp import FastMCP
@@ -22,7 +24,8 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.responses import JSONResponse
 
 HIVEOS_API = "https://api2.hiveos.farm/api/v2"
-HIVEOS_TOKEN = os.environ["HIVEOS_TOKEN"]
+HIVEOS_LOGIN = os.environ["HIVEOS_LOGIN"]
+HIVEOS_PASSWORD = os.environ["HIVEOS_PASSWORD"]
 FARM_ID = os.environ["HIVEOS_FARM_ID"]
 MCP_AUTH_TOKEN = os.environ.get("MCP_AUTH_TOKEN", "")
 ENABLE_WRITE = os.environ.get("MCP_ENABLE_WRITE", "false").lower() == "true"
@@ -32,37 +35,62 @@ SAFE_COMMANDS = {"reboot", "miner restart", "miner stop", "miner start"}
 
 mcp = FastMCP("HiveOS")
 
+# --- Auth HiveOS : login/password -> JWT de session, rafraîchi au besoin ---
+_jwt_lock = threading.Lock()
+_jwt = {"token": None, "expires_at": 0.0}
 
-def _client() -> httpx.Client:
-    return httpx.Client(
-        base_url=HIVEOS_API,
-        headers={
-            "Authorization": f"Bearer {HIVEOS_TOKEN}",
-            "Content-Type": "application/json",
-        },
+
+def _login() -> str:
+    r = httpx.post(
+        f"{HIVEOS_API}/auth/login",
+        json={"login": HIVEOS_LOGIN, "password": HIVEOS_PASSWORD},
         timeout=30,
     )
+    r.raise_for_status()
+    data = r.json()
+    token = data["access_token"]
+    # expires_in en secondes ; marge de 5 min pour re-login avant expiration
+    ttl = int(data.get("expires_in", 3600))
+    _jwt["token"] = token
+    _jwt["expires_at"] = time.time() + max(ttl - 300, 60)
+    return token
+
+
+def _get_token(force_refresh: bool = False) -> str:
+    with _jwt_lock:
+        if force_refresh or not _jwt["token"] or time.time() >= _jwt["expires_at"]:
+            return _login()
+        return _jwt["token"]
+
+
+def _request(method: str, path: str, payload: dict | None = None) -> dict:
+    token = _get_token()
+    for attempt in (1, 2):
+        with httpx.Client(base_url=HIVEOS_API, timeout=30) as c:
+            r = c.request(
+                method, path, json=payload,
+                headers={
+                    "Authorization": f"Bearer {token}",
+                    "Content-Type": "application/json",
+                },
+            )
+        if r.status_code == 401 and attempt == 1:
+            token = _get_token(force_refresh=True)  # JWT expiré -> re-login
+            continue
+        r.raise_for_status()
+        return r.json() if r.content else {"ok": True}
 
 
 def _get(path: str) -> dict:
-    with _client() as c:
-        r = c.get(path)
-        r.raise_for_status()
-        return r.json()
+    return _request("GET", path)
 
 
 def _patch(path: str, payload: dict) -> dict:
-    with _client() as c:
-        r = c.patch(path, json=payload)
-        r.raise_for_status()
-        return r.json() if r.content else {"ok": True}
+    return _request("PATCH", path, payload)
 
 
 def _post(path: str, payload: dict) -> dict:
-    with _client() as c:
-        r = c.post(path, json=payload)
-        r.raise_for_status()
-        return r.json() if r.content else {"ok": True}
+    return _request("POST", path, payload)
 
 
 # ---------------------------------------------------------------- LECTURE --
