@@ -4,14 +4,13 @@ services:
     container_name: hiveos-mcp
     env_file: .env
     restart: unless-stopped
-    ports:
-      - "127.0.0.1:8000:8000"   # accessible uniquement en local, le tunnel fait le reste
+    volumes:
+      - ./ssh:/app/ssh:ro
+    networks:
+      - default
+      - caddy_net
 
-  cloudflared:
-    image: cloudflare/cloudflared:latest
-    container_name: hiveos-mcp-tunnel
-    restart: unless-stopped
-    command: tunnel --no-autoupdate run --token ${CLOUDFLARE_TUNNEL_TOKEN}
-    env_file: .env
-    depends_on:
-      - hiveos-mcp
+networks:
+  caddy_net:
+    external: true
+    name: maraicher_les_graviers_maraicher_network
